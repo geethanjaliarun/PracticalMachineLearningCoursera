@@ -1,0 +1,161 @@
+---
+title: "Qualitative Human Activity Recoginition"
+author: "Geethanjali Arun"
+date: "25 December 2015"
+output: html_document
+---
+
+##Summary
+
+This project attempts to develop a system for assessing the quality of the weight lifting exercises. The data is from 4 on-body sensors of the users. The data is to be classified in to **5 classes(A, B, C, D and E)** out of which class A corresponds to the correct way of weight lifting. The original data had been sampled using a sliding window method and appropriate metrics (kurtosis, skewness, min, max, amplitude, variance, average and standard deviation) had been calculated. The given data has **19622 rows from 6 users and has 157 columns**. As the new features had already been created, there is no need for feature creation, only feature extraction needs be done. 
+
+
+##Data Exploration and Pre-processing
+
+The data has 3 columns of time information, 2 columns of sliding window sampling information. As necessary sampling and metric calculation has been done, these 5 columns can be removed. There are some columns of data that have only NA-s. Those columns are also removed. After columns removal, 148 columns remain, out of which columns **user_name** and **classe** are factors. Rest of the columns are of type numeric. classe is the column that has to predicted.
+
+```{r, cache=TRUE}
+library(mlbench)
+library(caret)
+library(dplyr)
+set.seed(125)
+trainData = read.csv("pml-training.csv", na.strings = c("NA", "#DIV/0!"))
+trainData = trainData[, -c(3:7, 1)]
+isAllNA = sapply(trainData, function(x)all(is.na(x)))
+toRemoveL = which(isAllNA)
+toRemove = as.data.frame(toRemoveL)
+trainData = trainData[, -toRemove$toRemoveL]
+```
+
+
+###Feature Extraction
+
+Features are extracted by ranking the features by variable importance. 10 fold cross validation is applied to select the number of features to retain in the final model. We vary the number of features from 15 to 30.
+
+####Calculating variable importance
+
+The variable importance is calculated by applying 5-fold cross validation to random forests. The variables are then ordered by variable importance.
+
+```{r, cache = TRUE}
+
+selectVariables = function(n, nData)
+{
+        control <- trainControl(method="cv", number=5)
+        model = train(classe ~ ., method = "rf", trControl = control, data = nData)
+        importance = varImp(model)
+        importantVariables = as.data.frame(importance[[1]])
+        importantVariables$var = row.names(importantVariables) 
+        importantVariables = arrange(importantVariables, desc(Overall))
+        retVal = importantVariables[1:n, ]$var
+        gsub("user_name.*", "user_name", retVal)
+}
+
+```
+
+
+####Selecting number of variables by 10-fold cross-validation
+
+The cross validated errors for the number of variables from 15 to 30 is calculated by building a random forest model. The cross validated are errors are plotted below.
+
+```{r, cache=TRUE}
+buildModelAndFindTestError = function(sPredictors, trainSet, testSet)
+{
+        filteredTrainSet = trainSet[, c(sPredictors, "classe")]
+        filteredSet.roughFix = na.roughfix(filteredTrainSet)
+        testSet = testSet[, c(sPredictors, "classe")]
+        testSet.roughFix = na.roughfix(testSet)
+        model = randomForest(classe ~ ., data = filteredSet.roughFix)
+        testPredict = predict(model, testSet.roughFix, type = "response")
+        successRate = sum(testPredict == testSet$classe)/nrow(testSet)
+        return(successRate)
+        
+}
+
+folds = createFolds(trainData$classe, k = 10, list = T, returnTrain = F)
+varList = 15:30
+cvResults = numeric(length(varList))
+stPt = varList[1] - 1
+for(varVal in varList)
+{
+        print(varVal)
+        for(i in 1:10)
+        {
+                cvTrain = trainData[-folds[[i]], ]
+                cvTest = trainData[folds[[i]], ]
+                selectedPredictors = selectVariables(varVal, cvTrain)
+                cvResults[varVal-stPt] = cvResults[varVal-stPt] + buildModelAndFindTestError(selectedPredictors, cvTrain, cvTest)
+        }
+}
+cvResults = cvResults * 10
+errorRates = 100 - cvResults
+plot(varList, errorRates, type = "b", main = "Error rates Vs Number of predictors", xlab = "Number of Predictors", ylab = "Error Rate %", col = "red", pch = 18)
+
+```
+
+The cross validated errors for number of predictors from 15 to 30 is:
+
+```{r, cache=TRUE}
+print(errorRates)
+```
+
+It can be inferred from the above plot that the cross validated error decreases with the increase in the number of variables but becomes almost constant for values greater than 25. We select the number of variables to be 29, though any value above 25 could be selected. So our final model will have **29 features** selected from the variable importance values and we use a **random forest with bagging** to classify the input.
+
+###Building the final model
+
+####Extracting 29 features by Cross validation
+
+Now that it has been decided to use 29 predictors, the 29 features must be picked. We again use **cross validation (randomForest method)** to finalise the predictors. The cv-error for different choices of 29 predictors is plotted below.
+
+```{r, cache=TRUE}
+selected29Predictors = list()
+predictors29CvError = numeric(10)
+folds = createFolds(trainData$classe, k = 10, list = T, returnTrain = F)
+for(i in 1:10)
+{
+        cvTrain = trainData[-folds[[i]], ]
+        cvTest = trainData[folds[[i]], ]
+        selectedPredictors = selectVariables(29, cvTrain)
+        selected29Predictors[[i]] = selectedPredictors
+        predictors29CvError[i] =  buildModelAndFindTestError(selectedPredictors, cvTrain, cvTest)
+}
+        predictors29CvError = (1 - predictors29CvError) * 100
+        plot(1:10, predictors29CvError, type = "b", main = "Error rates for choices of predictors", xlab = "Choices of Predictors", ylab = "Error Rate %", col = "red", pch = 18)
+        
+
+```
+
+We select the **predictor set** with the lowest cross validated error. The selected set of predictors is given below.
+
+```{r, cache = TRUE}
+print(predictors29CvError)
+index = which.min(predictors29CvError)
+finalPredictors = selected29Predictors[[index]]
+print(finalPredictors)
+```
+
+####Developing a Random forest with bagging
+
+With the selected 29 predictors, we develop a **random forest with bagging**. As the input has a number of NA values, we use **rpart** (Recursive Partitioning and Regression Trees). **ipred** package provides a function to perform bagging with rpart. 25 bootstrap replications are performed.
+
+```{r, cache=TRUE}
+library(ipred)
+finalModel = ipredbagg(trainData$classe, trainData[, finalPredictors])
+```
+
+
+```{r, cache = TRUE}
+predictedValuesForInput = predict(finalModel, trainData[, finalPredictors])
+misClassifications = sum(predictedValuesForInput != trainData$classe)
+print("The confusion matrix is ")
+table(predictedValuesForInput, trainData$classe)
+```
+
+The number of misclassified data is `r misClassifications`.
+The in-sample error rate for the model built is:  
+`r misClassifications/nrow(trainData)`%. This in-sample error rate is overly optimistic and does not reflect the real error rate.
+
+
+####Out of sample error of the model
+
+The out of sample error is the cross validated error that was obtained when cv was preformed for choosing 29 predictors. The **out of sample error** is `r round(mean(predictors29CvError), 2) `%. The success rate being `r round(100 - mean(predictors29CvError), 2)`%.
+
